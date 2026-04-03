@@ -221,11 +221,7 @@ static bool8 Clang_Init( compilerBackend_t *backend, const buildContext_t *conte
 
 	const char *pathToCompiler = path_remove_file_from_path( compilerPath.c_str() );
 
-#if defined( _WIN32 )
-	string_printf( &clangState->arPath, "%s%car", pathToCompiler, PATH_SEPARATOR );
-#elif defined( __linux__ )
 	string_printf( &clangState->arPath, "%s%c%s", pathToCompiler, PATH_SEPARATOR, linkerExe );
-#endif
 
 #ifdef _WIN32
 	clangState->winSDK = context->winSDK;
@@ -330,7 +326,8 @@ static bool8 Clang_LinkIntermediateFiles( compilerBackend_t *backend, const Arra
 
 	Array<const char *> &args = clangState->args;
 	args.reserve(
-		1 + // lib.exe or link.exe
+		1 + // lld-link
+		1 + // /lib (static library only)
 		1 + // verbose flag
 		1 + // /DLL
 		1 + // /NODEFAULTLIB
@@ -348,57 +345,68 @@ static bool8 Clang_LinkIntermediateFiles( compilerBackend_t *backend, const Arra
 	args.reset();
 
 #ifdef _WIN32
-	//args.add( clangState->linkerPath.data );
 	if ( config->binaryType == BINARY_TYPE_STATIC_LIBRARY ) {
-		args.add( tprintf( "%s\\bin\\Hostx64\\x64\\lib", clangState->msvcInstall.rootFolder.data ) );
+		args.add( clangState->arPath.data );
+		args.add( "/lib" );
+
+		if ( g_verbose ) {
+			args.add( "/verbose" );
+		}
+
+		args.add( tprintf( "/OUT:%s", fullBinaryName ) );
+
+		args.add_range( &intermediateFiles );
+
+		For ( u32, libIndex, 0, config->additionalLinkerArguments.size() ) {
+			args.add( config->additionalLinkerArguments[libIndex].c_str() );
+		}
 	} else {
-		args.add( tprintf( "%s\\bin\\Hostx64\\x64\\link", clangState->msvcInstall.rootFolder.data ) );
-
+		args.add( clangState->linkerPath.data );
 		args.add( "/NODEFAULTLIB" );
-	}
 
-	if ( g_verbose ) {
-		args.add( "/verbose" );
-	}
+		if ( g_verbose ) {
+			args.add( "/verbose" );
+		}
 
-	if ( config->binaryType == BINARY_TYPE_DYNAMIC_LIBRARY ) {
-		args.add( "/DLL" );
-	}
+		if ( config->binaryType == BINARY_TYPE_DYNAMIC_LIBRARY ) {
+			args.add( "/DLL" );
+		}
 
-	if ( config->binaryType != BINARY_TYPE_STATIC_LIBRARY && !config->removeSymbols ) {
-		args.add( "/DEBUG" );
-	}
+		if ( !config->removeSymbols ) {
+			args.add( "/DEBUG" );
+		}
 
-	args.add( tprintf( "/OUT:%s", fullBinaryName ) );
+		args.add( tprintf( "/OUT:%s", fullBinaryName ) );
 
-	args.add_range( &intermediateFiles );
+		args.add_range( &intermediateFiles );
 
-	args.add( tprintf( "/LIBPATH:%s", clangState->winSDK.ucrtLibPath.data ) );
-	args.add( tprintf( "/LIBPATH:%s", clangState->winSDK.umLibPath.data ) );
-	args.add( tprintf( "/LIBPATH:%s", clangState->msvcInstall.libPath.data ) );
+		args.add( tprintf( "/LIBPATH:%s", clangState->winSDK.ucrtLibPath.data ) );
+		args.add( tprintf( "/LIBPATH:%s", clangState->winSDK.umLibPath.data ) );
+		args.add( tprintf( "/LIBPATH:%s", clangState->msvcInstall.libPath.data ) );
 
-	For ( u32, libPathIndex, 0, config->additionalLibPaths.size() ) {
-		args.add( tprintf( "/LIBPATH:%s", config->additionalLibPaths[libPathIndex].c_str() ) );
-	}
+		For ( u32, libPathIndex, 0, config->additionalLibPaths.size() ) {
+			args.add( tprintf( "/LIBPATH:%s", config->additionalLibPaths[libPathIndex].c_str() ) );
+		}
 
-	args.add( "kernel32.lib" );
+		args.add( "kernel32.lib" );
 
 #if defined( _DEBUG )
-	args.add( "msvcrtd.lib" );
-	args.add( "vcruntimed.lib" );
-	args.add( "ucrtd.lib" );
+		args.add( "msvcrtd.lib" );
+		args.add( "vcruntimed.lib" );
+		args.add( "ucrtd.lib" );
 #else
-	args.add( "msvcrt.lib" );
-	args.add( "vcruntime.lib" );
-	args.add( "ucrt.lib" );
+		args.add( "msvcrt.lib" );
+		args.add( "vcruntime.lib" );
+		args.add( "ucrt.lib" );
 #endif
 
-	For ( u32, libIndex, 0, config->additionalLibs.size() ) {
-		args.add( tprintf( "%s%s", config->additionalLibs[libIndex].c_str(), GetFileExtensionFromBinaryType( BINARY_TYPE_STATIC_LIBRARY ) ) );
-	}
+		For ( u32, libIndex, 0, config->additionalLibs.size() ) {
+			args.add( tprintf( "%s%s", config->additionalLibs[libIndex].c_str(), GetFileExtensionFromBinaryType( BINARY_TYPE_STATIC_LIBRARY ) ) );
+		}
 
-	For ( u32, libIndex, 0, config->additionalLinkerArguments.size() ) {
-		args.add( config->additionalLinkerArguments[libIndex].c_str() );
+		For ( u32, libIndex, 0, config->additionalLinkerArguments.size() ) {
+			args.add( config->additionalLinkerArguments[libIndex].c_str() );
+		}
 	}
 #else
 	// clang and gcc treat static libraries as just an archive of .o files
