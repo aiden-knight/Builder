@@ -50,8 +50,6 @@ struct msvcState_t {
 	// windows sdk includes, msvc includes, that kind of thing
 	std::vector<std::string>	microsoftCoreIncludes;
 	std::vector<std::string>	microsoftCoreLibPaths;
-
-	std::vector<std::string>	includeDependencies;
 };
 
 //================================================================
@@ -126,71 +124,75 @@ static void MSVC_Shutdown( compilerBackend_t *backend ) {
 	backend->data = NULL;
 }
 
-static bool8 MSVC_CompileSourceFile(
+static bool8 MSVC_PrepareSourceFileCompilation(
 	compilerBackend_t *backend,
 	buildContext_t *buildContext,
 	BuildConfig *config,
 	compilationCommandArchetype_t &cmdArchetype,
 	const char *sourceFile,
-	bool recordCompilation )
+	const char *intermediateFile,
+	bool recordCompilation,
+	sourceFileCompilationTask_t &outTask )
 {
-	assert( backend );
+	unused( backend );
+
 	assert( sourceFile );
 	assert( config );
 
-	const char *sourceFileNoPath = path_remove_path_from_file( sourceFile );
-	const char *sourceFileNoExtension = path_remove_file_extension( sourceFileNoPath );
-
 	config->additionalIncludes.emplace_back( "." );
 
-	msvcState_t *msvcState = cast( msvcState_t *, backend->data );
+	// MSVC concatenates the output flag and filename into a single arg (e.g. "/Fo<file>")
+	outTask.intermediateFlagArg = std::string( cmdArchetype.outputFlag ) + intermediateFile;
 
-	msvcState->includeDependencies.clear();
-
-	Array<const char *> finalArgs = cmdArchetype.baseArgs;
-
-	const char *intermediateFile = tprintf( "%s%c%s.o", config->intermediateFolder.c_str(), PATH_SEPARATOR, sourceFileNoExtension );
-
-	// Fill up remaining arguments
+	outTask.finalArgs = cmdArchetype.baseArgs;
 
 	// Output Flag/File
-	finalArgs.add( tprintf( "%s%s", cmdArchetype.outputFlag, intermediateFile ) );
+	outTask.finalArgs.add( outTask.intermediateFlagArg.c_str() );
 
 	// Source File
-	finalArgs.add( sourceFile );
+	outTask.finalArgs.add( sourceFile );
 
 	// MSVC doesnt output include dependencies to .d files
 	// it only supports printing them to stdout
 	// so we have to parse the stdout of the process ourselves
-	procFlags_t procFlags = 0;
+	outTask.procFlags = 0;
 	if ( buildContext->consolidateCompilerArgs ) {
 		printf( "%s -> %s\n", sourceFile, intermediateFile );
 	} else {
-		procFlags = PROC_FLAG_SHOW_ARGS;
+		outTask.procFlags = PROC_FLAG_SHOW_ARGS;
 	}
 
-	String processStdout;
-	s32 exitCode = RunProc( &finalArgs, NULL, procFlags, &processStdout );
+	outTask.captureStdout     = true;
+	outTask.shouldRun         = true;
+	outTask.recordCompilation = recordCompilation;
+	outTask.sourceFile        = sourceFile;
 
-	// now parse the stdout
-	// all include dependencies are on their own line
-	// the line always starts with a specific prefix
-	{
-		const char *buffer = processStdout.data;
+	return true;
+}
 
+static void MSVC_FinalizeSourceFileCompilation(
+	compilerBackend_t *backend,
+	buildContext_t *buildContext,
+	sourceFileCompilationTask_t &task,
+	std::vector<std::string> &outIncludeDeps )
+{
+	unused( backend );
+
+	// parse stdout for include dependencies and compiler output
+	if ( task.processStdout.data ) {
 		const char *includeDependencyPrefix = "Note: including file: ";
 		const u64 includeDependencyPrefixLength = strlen( includeDependencyPrefix );
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wcast-qual"
-		char *lineStart = cast( char *, buffer );
+		char *lineStart = cast( char *, task.processStdout.data );
 #pragma clang diagnostic pop
 
 		while ( *lineStart ) {
 			char *lineEnd = strchr( lineStart, '\n' );
 
 			if ( !lineEnd ) {
-				continue;
+				break;
 			}
 
 			u64 lineLength = cast( u64, lineEnd ) - cast( u64, lineStart );
@@ -207,7 +209,7 @@ static bool8 MSVC_CompileSourceFile(
 					bufferLine.erase( 0, 1 );
 				}
 
-				msvcState->includeDependencies.push_back( bufferLine );
+				outIncludeDeps.push_back( bufferLine );
 			} else {
 				printf( "%s\n", bufferLine.c_str() );
 			}
@@ -216,11 +218,9 @@ static bool8 MSVC_CompileSourceFile(
 		}
 	}
 
-	if ( recordCompilation ) {
-		RecordCompilationDatabaseEntry( buildContext, sourceFile, finalArgs );
+	if ( task.recordCompilation ) {
+		RecordCompilationDatabaseEntry( buildContext, task.sourceFile, task.finalArgs );
 	}
-
-	return exitCode == 0;
 }
 
 static bool8 MSVC_LinkIntermediateFiles( compilerBackend_t *backend, const Array<const char *> &intermediateFiles, BuildConfig *config ) {
@@ -416,11 +416,6 @@ static bool8 MSVC_GetCompilationCommandArchetype( const compilerBackend_t *backe
 	return true;
 }
 
-static void MSVC_GetIncludeDependenciesFromSourceFileBuild( compilerBackend_t *backend, std::vector<std::string> &outIncludeDependencies ) {
-	msvcState_t *msvcState = cast( msvcState_t *, backend->data );
-
-	outIncludeDependencies = msvcState->includeDependencies;
-}
 
 static String MSVC_GetCompilerPath( compilerBackend_t *backend ) {
 	msvcState_t *msvcState = cast( msvcState_t *, backend->data );
@@ -439,10 +434,10 @@ void CreateCompilerBackend_MSVC( compilerBackend_t *outBackend ) {
 		.data										= NULL,
 		.Init										= MSVC_Init,
 		.Shutdown									= MSVC_Shutdown,
-		.CompileSourceFile							= MSVC_CompileSourceFile,
+		.PrepareSourceFileCompilation				= MSVC_PrepareSourceFileCompilation,
+		.FinalizeSourceFileCompilation				= MSVC_FinalizeSourceFileCompilation,
 		.LinkIntermediateFiles						= MSVC_LinkIntermediateFiles,
 		.GetCompilationCommandArchetype				= MSVC_GetCompilationCommandArchetype,
-		.GetIncludeDependenciesFromSourceFileBuild	= MSVC_GetIncludeDependenciesFromSourceFileBuild,
 		.GetCompilerPath							= MSVC_GetCompilerPath,
 		.GetCompilerVersion							= MSVC_GetCompilerVersion,
 	};

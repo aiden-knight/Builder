@@ -53,6 +53,10 @@ SOFTWARE.
 #endif
 
 #include <stdio.h>
+#include <numeric>
+#include <algorithm>
+#include <atomic>
+#include <execution>
 
 /*
 =============================================================================
@@ -409,7 +413,7 @@ static buildResult_t BuildBinary( buildContext_t *context, BuildConfig *config, 
 	}
 
 	Array<const char *> intermediateFiles;
-	intermediateFiles.reserve( config->sourceFiles.size() );
+	intermediateFiles.resize( config->sourceFiles.size() );
 
 	// TODO(DM): 03/08/2025: this is kinda ugly
 	auto ShouldRebuildSourceFile = [context]( const char *sourceFile, const char *intermediateFilename, u32 sourceFileHashmapIndex ) -> bool8 {
@@ -475,15 +479,18 @@ static buildResult_t BuildBinary( buildContext_t *context, BuildConfig *config, 
 
 	// compile step
 	// make .o files for all compilation units
-	// TODO(DM): 14/06/2025: embarrassingly parallel
+	std::vector<sourceFileCompilationTask_t> compilationTasks( config->sourceFiles.size() );
+	std::vector<std::vector<std::string>> includeDepsPerFile( config->sourceFiles.size() );
+
+	// pre: build intermediate filenames and compilation commands sequentially
 	For ( u64, sourceFileIndex, 0, config->sourceFiles.size() ) {
 		const char *sourceFile = config->sourceFiles[sourceFileIndex].c_str();
 		const char *sourceFileNoPath = path_remove_path_from_file( sourceFile );
 
-		const char *intermediateFilename = tprintf( "%s%c%s.o", config->intermediateFolder.c_str(), PATH_SEPARATOR, path_remove_file_extension( sourceFileNoPath ) );
-		intermediateFiles.add( intermediateFilename );
-
-		const char *depFilename = tprintf( "%s%c%s.d", config->intermediateFolder.c_str(), PATH_SEPARATOR, sourceFileNoPath );
+		u64 intermediateFilenameLen = strlen( config->intermediateFolder.c_str() ) + 1 + strlen( path_remove_file_extension( sourceFileNoPath ) ) + 3;
+		char *intermediateFilename = cast( char *, mem_alloc( intermediateFilenameLen ) );
+		snprintf( intermediateFilename, intermediateFilenameLen, "%s%c%s.o", config->intermediateFolder.c_str(), PATH_SEPARATOR, path_remove_file_extension( sourceFileNoPath ) );
+		intermediateFiles[sourceFileIndex] = intermediateFilename;
 
 		u32 sourceFileHashmapIndex = hashmap_get_value( context->sourceFileIndices, hash_string( sourceFile, 0 ) );
 
@@ -492,18 +499,69 @@ static buildResult_t BuildBinary( buildContext_t *context, BuildConfig *config, 
 			continue;
 		}
 
-		if ( !compilerBackend->CompileSourceFile( compilerBackend, context, config, cmdArchetype, sourceFile, generateCompilationDatabase ) ) {
-			error( "Compile failed.\n" );
+		if ( !compilerBackend->PrepareSourceFileCompilation( compilerBackend, context, config, cmdArchetype, sourceFile, intermediateFilename, generateCompilationDatabase, compilationTasks[sourceFileIndex] ) ) {
+			error( "Failed to prepare compilation.\n" );
 			return BUILD_RESULT_FAILED;
 		}
+	}
 
-		std::vector<std::string> includeDependencies;
-		compilerBackend->GetIncludeDependenciesFromSourceFileBuild( compilerBackend, includeDependencies );
+	// parallel: run all compilation commands with no shared state
+	{
+		std::atomic<bool> compileFailed { false };
+
+		std::vector<u64> indices( config->sourceFiles.size() );
+		std::iota( indices.begin(), indices.end(), 0 );
+
+		std::for_each( std::execution::par, indices.begin(), indices.end(), [&]( u64 sourceFileIndex ) {
+			sourceFileCompilationTask_t &task = compilationTasks[sourceFileIndex];
+
+			if ( compileFailed || !task.shouldRun ) {
+				return;
+			}
+
+			task.ran      = true;
+			task.exitCode = RunProc( &task.finalArgs, NULL, task.procFlags, task.captureStdout ? &task.processStdout : NULL );
+
+			if ( task.exitCode != 0 ) {
+				compileFailed = true;
+			}
+		} );
+	}
+
+	// post: finalize all tasks that ran, then check for failures
+	bool8 compileFailed = false;
+
+	For ( u64, sourceFileIndex, 0, config->sourceFiles.size() ) {
+		sourceFileCompilationTask_t &task = compilationTasks[sourceFileIndex];
+
+		if ( !task.ran ) {
+			continue;
+		}
+
+		compilerBackend->FinalizeSourceFileCompilation( compilerBackend, context, task, includeDepsPerFile[sourceFileIndex] );
+
+		if ( task.exitCode != 0 ) {
+			compileFailed = true;
+		}
+	}
+
+	if ( compileFailed ) {
+		error( "Compile failed.\n" );
+		return BUILD_RESULT_FAILED;
+	}
+
+	For ( u64, sourceFileIndex, 0, config->sourceFiles.size() ) {
+		if ( includeDepsPerFile[sourceFileIndex].empty() ) {
+			continue;
+		}
+
+		const char *sourceFile = config->sourceFiles[sourceFileIndex].c_str();
+		u32 sourceFileHashmapIndex = hashmap_get_value( context->sourceFileIndices, hash_string( sourceFile, 0 ) );
 
 		if ( sourceFileHashmapIndex != HASHMAP_INVALID_VALUE ) {
-			context->sourceFileIncludeDependencies[sourceFileHashmapIndex].includeDependencies = includeDependencies;
+			context->sourceFileIncludeDependencies[sourceFileHashmapIndex].includeDependencies = std::move( includeDepsPerFile[sourceFileIndex] );
 		} else {
-			context->sourceFileIncludeDependencies.push_back( { sourceFile, includeDependencies } );
+			context->sourceFileIncludeDependencies.push_back( { sourceFile, std::move( includeDepsPerFile[sourceFileIndex] ) } );
 		}
 	}
 

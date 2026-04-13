@@ -44,7 +44,7 @@ SOFTWARE.
 #endif
 
 #include <vector>
-//#include <string>
+#include <string>
 
 // cmd line args
 #define ARG_HELP_SHORT			"-h"
@@ -76,15 +76,29 @@ struct compilationCommandArchetype_t {
 	const char			*outputFlag = nullptr;
 };
 
+struct sourceFileCompilationTask_t {
+	Array<const char *>	finalArgs;
+	std::string			depFilename;		// Clang/GCC: path to .d file; used as pointer storage for finalArgs
+	std::string			intermediateFlagArg;	// MSVC: "/Fo<intermediateFile>" concatenation; used as pointer storage for finalArgs
+	const char			*sourceFile;
+	procFlags_t			procFlags;
+	bool8				captureStdout;
+	bool8				shouldRun;
+	bool8				ran;
+	bool				recordCompilation;
+	s32				exitCode;
+	String				processStdout;
+};
+
 struct compilerBackend_t {
 	void	*data;
 
 	bool8	( *Init )( compilerBackend_t *backend, const buildContext_t *context, const std::string &compilerPath, const std::string &compilerVersion );
 	void	( *Shutdown )( compilerBackend_t *backend );
-	bool8	( *CompileSourceFile )( compilerBackend_t *backend, buildContext_t *buildContext, BuildConfig *config, compilationCommandArchetype_t &commandArchetype, const char *sourceFile, bool recordCompilation );
+	bool8	( *PrepareSourceFileCompilation )( compilerBackend_t *backend, buildContext_t *buildContext, BuildConfig *config, compilationCommandArchetype_t &commandArchetype, const char *sourceFile, const char *intermediateFile, bool recordCompilation, sourceFileCompilationTask_t &outTask );
+	void	( *FinalizeSourceFileCompilation )( compilerBackend_t *backend, buildContext_t *buildContext, sourceFileCompilationTask_t &task, std::vector<std::string> &outIncludeDeps );
 	bool8	( *LinkIntermediateFiles )( compilerBackend_t *backend, const Array<const char *> &intermediateFiles, BuildConfig *config );
 	bool8	( *GetCompilationCommandArchetype )( const compilerBackend_t *backend, const BuildConfig *config, compilationCommandArchetype_t &outCmdArchetype );
-	void	( *GetIncludeDependenciesFromSourceFileBuild )( compilerBackend_t *backend, std::vector<std::string> &includeDependencies );
 	String	( *GetCompilerPath )( compilerBackend_t *backend );
 	String	( *GetCompilerVersion )( compilerBackend_t *backend );
 };

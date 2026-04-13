@@ -46,8 +46,6 @@ SOFTWARE.
 struct clangState_t {
 	Array<const char *>			args;
 
-	std::vector<std::string>	includeDependencies;
-
 	// TODO(DM): 11/02/2026: remove these when eds command archetype changes get merged in
 	String						compilerPath;
 	String						compilerVersion;
@@ -265,59 +263,71 @@ static void Clang_Shutdown( compilerBackend_t *backend ) {
 	backend->data = NULL;
 }
 
-static bool8 Clang_CompileSourceFile(
+static bool8 Clang_PrepareSourceFileCompilation(
 	compilerBackend_t *backend,
 	buildContext_t *buildContext,
 	BuildConfig *config,
 	compilationCommandArchetype_t &cmdArchetype,
 	const char *sourceFile,
-	bool recordCompilation )
+	const char *intermediateFile,
+	bool recordCompilation,
+	sourceFileCompilationTask_t &outTask )
 {
-	assert( backend );
+	unused( backend );
+
 	assert( sourceFile );
 
-	clangState_t *clangState = cast( clangState_t *, backend->data );
-
 	const char *sourceFileNoPath = path_remove_path_from_file( sourceFile );
-	const char *depFilename = tprintf( "%s%c%s.d", config->intermediateFolder.c_str(), PATH_SEPARATOR, sourceFileNoPath );
 
-	Array<const char *> finalArgs = cmdArchetype.baseArgs;
+	char depFilenameBuf[4096];
+	snprintf( depFilenameBuf, sizeof( depFilenameBuf ), "%s%c%s.d", config->intermediateFolder.c_str(), PATH_SEPARATOR, sourceFileNoPath );
+	outTask.depFilename = depFilenameBuf;
 
-	const char *intermediateFile = tprintf( "%s%c%s.o", config->intermediateFolder.c_str(), PATH_SEPARATOR, path_remove_file_extension( sourceFileNoPath ) );
-
-	// Fill up remaining arguments
+	outTask.finalArgs = cmdArchetype.baseArgs;
 
 	// Dependency Flags/File
 	For ( u64, flagIndex, 0, cmdArchetype.dependencyFlags.count ) {
-		finalArgs.add( cmdArchetype.dependencyFlags[flagIndex] );
+		outTask.finalArgs.add( cmdArchetype.dependencyFlags[flagIndex] );
 	}
-	finalArgs.add( tprintf( "%s%c%s.d", config->intermediateFolder.c_str(), PATH_SEPARATOR, sourceFileNoPath ) );
+	outTask.finalArgs.add( outTask.depFilename.c_str() );
 
 	// Output Flag/File
-	finalArgs.add( cmdArchetype.outputFlag );
-	finalArgs.add( intermediateFile );
+	outTask.finalArgs.add( cmdArchetype.outputFlag );
+	outTask.finalArgs.add( intermediateFile );
 
 	// Source File
-	finalArgs.add( sourceFile );
+	outTask.finalArgs.add( sourceFile );
 
-	procFlags_t procFlags = PROC_FLAG_SHOW_STDOUT;
+	outTask.procFlags = PROC_FLAG_SHOW_STDOUT;
 	if ( buildContext->consolidateCompilerArgs ) {
 		printf( "%s -> %s\n", sourceFile, intermediateFile );
 	} else {
-		procFlags |= PROC_FLAG_SHOW_ARGS;
+		outTask.procFlags |= PROC_FLAG_SHOW_ARGS;
 	}
 
-	s32 exitCode = RunProc( &finalArgs, NULL, procFlags );
+	outTask.captureStdout   = false;
+	outTask.shouldRun       = true;
+	outTask.recordCompilation = recordCompilation;
+	outTask.sourceFile      = sourceFile;
 
-	if ( exitCode == 0 ) {
-		ReadDependencyFile( depFilename, clangState->includeDependencies );
+	return true;
+}
+
+static void Clang_FinalizeSourceFileCompilation(
+	compilerBackend_t *backend,
+	buildContext_t *buildContext,
+	sourceFileCompilationTask_t &task,
+	std::vector<std::string> &outIncludeDeps )
+{
+	unused( backend );
+
+	if ( task.exitCode == 0 ) {
+		ReadDependencyFile( task.depFilename.c_str(), outIncludeDeps );
 	}
 
-	if ( recordCompilation ) {
-		RecordCompilationDatabaseEntry( buildContext, sourceFile, finalArgs );
+	if ( task.recordCompilation ) {
+		RecordCompilationDatabaseEntry( buildContext, task.sourceFile, task.finalArgs );
 	}
-
-	return exitCode == 0;
 }
 
 static bool8 Clang_LinkIntermediateFiles( compilerBackend_t *backend, const Array<const char *> &intermediateFiles, BuildConfig *config ) {
@@ -747,14 +757,6 @@ static bool8 Clang_GetCompilationCommandArchetype( const compilerBackend_t *back
 	return true;
 }
 
-// only call this after compilation has finished successfully
-// parse the dependency file that we generated for every dependency thats in there
-// add those to a list - we need to put those in the .build_info file
-static void Clang_GetIncludeDependenciesFromSourceFileBuild( compilerBackend_t *backend, std::vector<std::string> &outIncludeDependencies ) {
-	clangState_t *clangState = cast( clangState_t *, backend->data );
-
-	outIncludeDependencies = clangState->includeDependencies;
-}
 
 static String Clang_GetCompilerPath( compilerBackend_t *backend ) {
 	clangState_t *clangState = cast( clangState_t *, backend->data );
@@ -843,10 +845,10 @@ void CreateCompilerBackend_Clang( compilerBackend_t *outBackend ) {
 		.data										= NULL,
 		.Init										= Clang_Init,
 		.Shutdown									= Clang_Shutdown,
-		.CompileSourceFile							= Clang_CompileSourceFile,
+		.PrepareSourceFileCompilation				= Clang_PrepareSourceFileCompilation,
+		.FinalizeSourceFileCompilation				= Clang_FinalizeSourceFileCompilation,
 		.LinkIntermediateFiles						= Clang_LinkIntermediateFiles,
 		.GetCompilationCommandArchetype				= Clang_GetCompilationCommandArchetype,
-		.GetIncludeDependenciesFromSourceFileBuild	= Clang_GetIncludeDependenciesFromSourceFileBuild,
 		.GetCompilerPath							= Clang_GetCompilerPath,
 		.GetCompilerVersion							= Clang_GetCompilerVersion,
 	};
@@ -857,10 +859,10 @@ void CreateCompilerBackend_GCC( compilerBackend_t *outBackend ) {
 		.data										= NULL,
 		.Init										= GCC_Init,
 		.Shutdown									= Clang_Shutdown,
-		.CompileSourceFile							= Clang_CompileSourceFile,
+		.PrepareSourceFileCompilation				= Clang_PrepareSourceFileCompilation,
+		.FinalizeSourceFileCompilation				= Clang_FinalizeSourceFileCompilation,
 		.LinkIntermediateFiles						= GCC_LinkIntermediateFiles,
 		.GetCompilationCommandArchetype				= Clang_GetCompilationCommandArchetype,
-		.GetIncludeDependenciesFromSourceFileBuild	= Clang_GetIncludeDependenciesFromSourceFileBuild,
 		.GetCompilerPath							= Clang_GetCompilerPath,
 		.GetCompilerVersion							= GCC_GetCompilerVersion,
 	};
