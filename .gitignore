@@ -46,3 +46,9 @@ x64
 # claude stuff
 #
 .claude/
+
+#
+# builder bootstrap stuff
+#
+/builder.exe
+/libclang.dll
