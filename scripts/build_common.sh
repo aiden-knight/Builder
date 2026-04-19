@@ -28,7 +28,6 @@ mkdir -p $intermediateFolder
 
 defines="-D_CRT_SECURE_NO_WARNINGS -DCORE_USE_XXHASH -DCORE_SUC -DCORE_USE_SUBPROCESS -DHASHMAP_HIDE_MISSING_KEY_WARNING -DHLML_NAMESPACE"
 if [[ "$config" == "debug" ]]; then
-	symbols="-g"
 	optimisation=""
 	programName=builder_$config
 	defines="$defines -D_DEBUG -DBUILDER_PROGRAM_NAME=\"$programName\""

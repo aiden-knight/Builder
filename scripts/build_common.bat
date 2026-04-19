@@ -42,7 +42,6 @@ if not exist %intermediateFolder% (
 
 REM Set up config specific environment variables
 if /I [%config%] == [debug] (
-	set symbols=-g
 	set optimisation=-O0
 	set programName=builder_debug
 	set defines=-D_CRT_SECURE_NO_WARNINGS -DCORE_USE_XXHASH -DCORE_USE_SUBPROCESS -DCORE_SUC -DHASHMAP_HIDE_MISSING_KEY_WARNING^
@@ -52,8 +51,7 @@ if /I [%config%] == [debug] (
  -lmsvcrtd.lib -lmsvcprtd.lib -lvcruntimed.lib -lucrtd.lib
 ) 
 
-if /I [%config%] == [release]  (
-	set symbols=
+if /I [%config%] == [release] (
 	set optimisation=-O3
 	set programName=builder
 	set defines=-D_CRT_SECURE_NO_WARNINGS -DCORE_USE_XXHASH -DCORE_USE_SUBPROCESS -DCORE_SUC -DHASHMAP_HIDE_MISSING_KEY_WARNING^
