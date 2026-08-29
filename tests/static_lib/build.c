@@ -25,10 +25,11 @@ int main( int argc, char **argv ) {
 		.dependsOn			= MakeDependencies( libConfig ),
 		.sourceFiles		= MakeStringList( "program/main.c" ),
 		.additionalIncludes	= MakeStringList( "lib" ),
+		.additionalLibPaths = MakeStringList( "." ),
 #if defined( _WIN32 )
-		.additionalLinkerArguments = MakeStringList( "test_static_lib.lib" ),
+		.additionalLibs = MakeStringList( "test_static_lib.lib" ),
 #else
-		.additionalLinkerArguments = MakeStringList( "./test_static_lib.a" ),
+		.additionalLibs = MakeStringList( "test_static_lib.a" ),
 #endif
 	};
 
