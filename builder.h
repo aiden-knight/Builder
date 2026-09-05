@@ -4437,7 +4437,7 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 					const char *linkCommand = NULL;
 					uint64_t linkCommandHash = 0;
 					#if defined( _WIN32 )
-						bool useMSVCLink = !compilerIsGCC || !( Builder_PathHasFileExtension( compilerPath, "gcc" ) || Builder_PathHasFileExtension( compilerPath, "gcc.exe" ) );
+						bool useMSVCLink = !compilerIsGCC || !( Builder_PathEndsWith( compilerPath, "gcc" ) || Builder_PathEndsWith( compilerPath, "gcc.exe" ) );
 					#elif defined( __linux__ )
 						bool useMSVCLink = false;
 					#else
