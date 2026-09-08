@@ -4471,7 +4471,7 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 				}
 
 				// link step
-				bool shouldLink = false;
+				bool shouldLink = needsCompilePacketCount > 0; // if we compiled something we obviously have to link
 				{
 					double linkTimeStart = Builder_TimeMS();
 					
@@ -4501,9 +4501,20 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 						};
 						linkCommand = Builder_CreateLinkCommand( buildScratch.arena, &linkContext, postBuildData );
 						linkCommandHash = Builder_HashString( linkCommand );
+
+						// this means we have no dependency file (or link data in it)
+						// which means we definitely need to link, and definitely need to force a full link
+						// otherwise we won't properly populate the dependency file
+						if ( postBuildData->configDependencies.linkCommandHash == 0 ) {
+							shouldLink = true;
+                            postBuildData->didFullLink = true;
+
+							if ( useMSVCLink ) {
+								linkCommand = Builder_FormatString( buildScratch.arena, "%s /INCREMENTAL:NO", linkCommand );
+							}
+						}
 					}
 
-                    bool forceNoIncremental = false;
 					uint64_t binaryFileWriteTime = 0;
 					if ( !shouldLink && linkCommand ) {
 						if ( postBuildData->configDependencies.binaryWriteTime && Builder_GetFileLastWriteTime( binaryPath, &binaryFileWriteTime ) ) {
@@ -4511,9 +4522,9 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 							const bool linkCommandMismatch 	= postBuildData->configDependencies.linkCommandHash != linkCommandHash;
 							shouldLink = binaryMismatch || linkCommandMismatch;
 						} else {
-							// binary doesn't exist or no dependency file
+							// binary doesn't exist, counts as a full link
 							shouldLink = true;
-                            forceNoIncremental = true;
+							postBuildData->didFullLink = true;
 						}
 					}
 
@@ -4540,10 +4551,6 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 					if ( shouldLink ) {
 						postBuildData->configDependencies.linkCommandHash = linkCommandHash;
 
-						if ( forceNoIncremental && useMSVCLink ) {
-							linkCommand = Builder_FormatString( buildScratch.arena, "%s /INCREMENTAL:NO", linkCommand );
-							postBuildData->didFullLink = true;
-						}
 						printf( "%s\n", linkCommand );
 
 						char *linkerOutput = NULL;
@@ -4555,6 +4562,7 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 
 							// force the link to show as a fail
 							postBuildData->configDependencies.binaryWriteTime = 0;
+							postBuildData->configDependencies.linkCommandHash = 0;
 							buildAllConfigsFailed = true;
 							break;
 						}
