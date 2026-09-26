@@ -677,11 +677,12 @@ static bool Builder_StringContains( const char *str, const char *substring ) {
 	return strstr( str, substring ) != NULL;
 }
 
-static const char * Builder_FilenameFromPath( const char *path ) {
+// returns the position just after the last slash
+static const char * Builder_FilenameFromPath( const char *path, uint64_t pathLength ) {
 	const char *filename = path;
     
     if ( filename ) {
-        filename = path + strlen( path );
+        filename = path + pathLength;
         while ( path != --filename ) {
             if ( *filename == '\\' || *filename == '/' ) {
                 filename++;
@@ -3644,8 +3645,9 @@ static builderConfigDependencies_t Builder_ConfigDependenciesFromByteBuffer( are
         for ( uint32_t libIndex = 0; libIndex < libraryDependencyArray->count; ++libIndex ) {
             libraryDependency_t *libDependency = &libraryDependencyArray->libraries[libIndex];
             libDependency->writeTime = Builder_U64FromByteBuffer( byteBuffer );
-            libDependency->libraryPath = Builder_StringFromByteBuffer( arena, byteBuffer, NULL );
-            libDependency->libraryName = Builder_FilenameFromPath( libDependency->libraryPath );
+			uint64_t pathLength;
+            libDependency->libraryPath = Builder_StringFromByteBuffer( arena, byteBuffer, &pathLength );
+            libDependency->libraryName = Builder_FilenameFromPath( libDependency->libraryPath, pathLength );
         }
 
 		// for incremental compile
@@ -3875,16 +3877,14 @@ typedef struct builderPostBuildConfigData_t {
 
 typedef struct builderLinkContext_t {
 	 BuildConfig					*config;
-#if defined ( _WIN32 )
-	 builderMSVCInstall_t			*msvcInstall;
-	 builderWindowsSDKInstall_t		*windowsSDKInstall;
-#endif
 	 const char						*compilerPath;
 	 const char						*binaryPath;
 	 const char						*clangSanitizerResourceDir;
+#if defined ( _WIN32 )
+	 builderMSVCInstall_t			*msvcInstall;
+	 builderWindowsSDKInstall_t		*windowsSDKInstall;
 	 bool							useMSVCLink;
 	 bool							compilerIsMSVC;
-#if defined ( _WIN32 )
 	 bool							debugDefineSet;
 #endif
 } builderLinkContext_t;
@@ -3917,11 +3917,6 @@ static const char * Builder_CreateLinkCommand( arena_t *commandArena, builderLin
 		StringBuilder_Appendf( scratch.arena, &linkerArgs, "/LIBPATH:\"%s\" ", linkContext->msvcInstall->libPath );
 		StringBuilder_Appendf( scratch.arena, &linkerArgs, "/LIBPATH:\"%s\" ", linkContext->windowsSDKInstall->umLibPath );
 		StringBuilder_Appendf( scratch.arena, &linkerArgs, "/LIBPATH:\"%s\" ", linkContext->windowsSDKInstall->ucrtLibPath );
-
-		// we always have to link all files
-		for ( uint32_t intermediateIndex = 0; intermediateIndex < postBuildData->packetCount; ++intermediateIndex ) {
-			StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", postBuildData->compilePackets[intermediateIndex].intermediateFile );
-		}
 
 		for ( builderStringChunk_t *chunk = config->additionalLibPaths.head; chunk; chunk = chunk->next ) {
 			for ( uint32_t libPathIndex = 0; libPathIndex < chunk->count; libPathIndex++ ) {
@@ -3990,6 +3985,8 @@ static const char * Builder_CreateLinkCommand( arena_t *commandArena, builderLin
 
 		StringBuilder_Appendf( scratch.arena, &linkerArgs, "/VERBOSE:LIB /NOLOGO " );
 	} else {
+#else
+	{
 #endif
 		if ( config->binaryType == BINARY_TYPE_STATIC_LIBRARY ) {
 			// remove the filename part of the compiler path, leaving just the path (if it exists)
@@ -4009,11 +4006,6 @@ static const char * Builder_CreateLinkCommand( arena_t *commandArena, builderLin
 			}
 
 			StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", linkContext->binaryPath );
-
-			// we always have to link all files
-			for ( uint32_t intermediateIndex = 0; intermediateIndex < postBuildData->packetCount; ++intermediateIndex ) {
-				StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", postBuildData->compilePackets[intermediateIndex].intermediateFile );
-			}
 		} else {
 			StringBuilder_Appendf( scratch.arena, &linkerArgs, "\"%s\" ", linkContext->compilerPath );
 
@@ -4033,11 +4025,6 @@ static const char * Builder_CreateLinkCommand( arena_t *commandArena, builderLin
 
 			StringBuilder_Appendf( scratch.arena, &linkerArgs, "-o " );
 			StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", linkContext->binaryPath );
-
-			// we always have to link all files
-			for ( uint32_t intermediateIndex = 0; intermediateIndex < postBuildData->packetCount; ++intermediateIndex ) {
-				StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", postBuildData->compilePackets[intermediateIndex].intermediateFile );
-			}
 
 			for ( builderStringChunk_t *chunk = config->additionalLibPaths.head; chunk; chunk = chunk->next ) {
 				for ( uint32_t libPathIndex = 0; libPathIndex < chunk->count; libPathIndex++ ) {
@@ -4078,9 +4065,7 @@ static const char * Builder_CreateLinkCommand( arena_t *commandArena, builderLin
 
             StringBuilder_Appendf( scratch.arena, &linkerArgs, "-Wl,--trace " );
 		}
-#if defined ( _WIN32 )
 	}
-#endif
 
 	for ( builderStringChunk_t *chunk = config->additionalLinkerArguments.head; chunk; chunk = chunk->next ) {
 		for ( uint32_t argumentIndex = 0; argumentIndex < chunk->count; argumentIndex++ ) {
@@ -4642,29 +4627,39 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 					uint64_t linkCommandHash = 0;
 					#if defined( _WIN32 )
 						bool useMSVCLink = !compilerIsGCC || !( Builder_PathEndsWith( compilerPath, "gcc" ) || Builder_PathEndsWith( compilerPath, "gcc.exe" ) );
-					#elif defined( __linux__ )
-						bool useMSVCLink = false;
-					#else
-					#error Unrecognised platform.
 					#endif
 					if ( compilePacketCount > 0 ) {
 						builderLinkContext_t linkContext = {
 							.config 					= config,
-#if defined ( _WIN32 )
-							.msvcInstall 				= &msvcInstall,
-							.windowsSDKInstall 			= &windowsSDKInstall,
-#endif
 							.binaryPath 				= binaryPath,
 							.compilerPath 				= compilerPath,
 							.clangSanitizerResourceDir 	= clangSanitizerResourceDir,
+#if defined ( _WIN32 )
+							.msvcInstall 				= &msvcInstall,
+							.windowsSDKInstall 			= &windowsSDKInstall,
 							.compilerIsMSVC				= compilerIsMSVC,
 							.useMSVCLink 				= useMSVCLink,
-#if defined ( _WIN32 )
 							.debugDefineSet 			= compileContext.debugDefineSet,
 #endif
 						};
 						linkCommand = Builder_CreateLinkCommand( buildScratch.arena, &linkContext, postBuildData );
 						linkCommandHash = Builder_HashString( linkCommand );
+
+						// append the .o files after hashing to deal with file order inconsistencies due to globbing and rebuilds
+						// also we really don't need to hash them since we already link if we compiled something
+						{
+							scratch_t scratch = Builder_GetScratch( buildScratch.arena );
+							
+							stringBuilder_t linkerArgs = { 0 };
+							StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", linkCommand );
+
+							for ( uint32_t intermediateIndex = 0; intermediateIndex < postBuildData->packetCount; ++intermediateIndex ) {
+								StringBuilder_Appendf( scratch.arena, &linkerArgs, "%s ", postBuildData->compilePackets[intermediateIndex].intermediateFile );
+							}
+
+							linkCommand = StringBuilder_ToString( buildScratch.arena, &linkerArgs, NULL );
+							Builder_RewindScratch( &scratch );
+						}
 
 						// this means we have no dependency file (or link data in it)
 						// which means we definitely need to link, and definitely need to force a full link
@@ -4672,10 +4667,11 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 						if ( postBuildData->configDependencies.linkCommandHash == 0 ) {
 							shouldLink = true;
                             postBuildData->didFullLink = true;
-
+#if defined ( _WIN32 )
 							if ( useMSVCLink ) {
 								linkCommand = Builder_FormatString( buildScratch.arena, "%s /INCREMENTAL:NO", linkCommand );
 							}
+#endif
 						}
 					}
 
@@ -4720,27 +4716,16 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 						char *linkerOutput = NULL;
 						int32_t linkResult = Builder_RunProcess( buildScratch.arena, linkCommand, false, &linkerOutput );
 
-						if ( linkResult != 0 ) {
-							Builder_Error( "Link failed.\n" );
-							Builder_RewindScratch( &buildScratch );
-
-							// force the link to show as a fail
-							postBuildData->configDependencies.binaryWriteTime = 0;
-							postBuildData->configDependencies.linkCommandHash = 0;
-							buildAllConfigsFailed = true;
-							break;
-						}
-
 						if ( linkerOutput ) {
+#if defined ( _WIN32 )
 							if ( useMSVCLink ) {
-
 								bool withinLibrarySearch = false;
 								const char *current = linkerOutput;
 								while ( current && *current ) {
 									const char *lineStart = current;
-									const char *lineEnd = strchr( current, '\n' );
+									const char *lineEnd = strchr( lineStart, '\n' );
 									if ( !lineEnd ) {
-										lineEnd = strchr( lineEnd, '\0' );
+										lineEnd = strchr( lineStart, '\0' );
 									}
 	
 									if ( !withinLibrarySearch && Builder_StringStartsWith( lineStart, "Searching libraries" ) ) {
@@ -4783,8 +4768,67 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 									}
 								}
 							} else {
-								printf( "%s\n", linkerOutput );
+#else
+							{
+#endif
+								const char *current = linkerOutput;
+								while ( current && *current ) {
+									const char *lineStart = current;
+									const char *lineEnd = strchr( lineStart, '\n' );
+									if ( !lineEnd ) {
+										lineEnd = strchr( lineStart, '\0' );
+									}
+									uint64_t lineLength = ( (uint64_t) lineEnd ) - ( (uint64_t) lineStart );
+									
+									// isolate only the --trace outputs
+									// TODO: AK: 26/09/2026: this seems brittle
+									const char *filename = Builder_FilenameFromPath( lineStart, lineLength );
+									const char *dotPos = strchr( filename, '.' );
+									const char *spacePos = dotPos ? strchr( dotPos, ' ' ) : NULL;
+									bool isTraceOutput = dotPos && dotPos < lineEnd 
+										&& ( !spacePos || spacePos > lineEnd ) 
+										&& !Builder_StringStartsWith( lineStart, "clang:" ); 
+									if ( isTraceOutput ) {
+										// TODO: AK: 26/09/2026: What happens if their intermediate and bin folder overlaps? Will we let them do that?
+										if ( !Builder_StringStartsWith( lineStart, intermediateFolder ) ) {
+											const char *library = Builder_FormatString( &postBuildArena, "%.*s", lineLength, lineStart );
+	
+											bool found = false;
+											for ( builderStringChunk_t *chunk = postBuildData->linkLibraryOutput.head; chunk && !found; chunk = chunk->next ) {
+												for ( uint32_t foundLibsIndex = 0; foundLibsIndex < chunk->count; foundLibsIndex++ ) {
+													if ( Builder_StringEquals( library, chunk->items[foundLibsIndex] ) ) {
+														found = true;
+														break;
+													}
+												}
+											}
+											
+											if ( !found ) {
+												Builder_StringListPush( &postBuildArena, &postBuildData->linkLibraryOutput, library );
+											}
+										}
+									} else {
+										printf( "%.*s\n", (int) ( lineLength ), lineStart );
+									}
+	
+									current = lineEnd;
+	
+									if ( current ) {
+										current += 1;
+									}
+								}
 							}
+						}
+
+						if ( linkResult != 0 ) {
+							Builder_Error( "Link failed.\n" );
+							Builder_RewindScratch( &buildScratch );
+
+							// force the link to show as a fail
+							postBuildData->configDependencies.binaryWriteTime = 0;
+							postBuildData->configDependencies.linkCommandHash = 0;
+							buildAllConfigsFailed = true;
+							break;
 						}
 
 						if ( !Builder_GetFileLastWriteTime( binaryPath, &postBuildData->configDependencies.binaryWriteTime ) ) {
@@ -4915,7 +4959,7 @@ int Build( BuilderOptions *options, int argc, char **argv ) {
 			for ( builderStringChunk_t *chunk = postBuildData->linkLibraryOutput.head; chunk; chunk = chunk->next ) {
 				for ( uint32_t foundLibsIndex = 0; foundLibsIndex < chunk->count; foundLibsIndex++ ) {
 					const char *libPath = chunk->items[foundLibsIndex];
-					const char *libFilename = Builder_FilenameFromPath( libPath );
+					const char *libFilename = Builder_FilenameFromPath( libPath, strlen( libPath ) );
 
 					bool found = false;
 					for ( uint64_t libIndex = 0; libIndex < libCountBeforeAppending; ++libIndex ) {
